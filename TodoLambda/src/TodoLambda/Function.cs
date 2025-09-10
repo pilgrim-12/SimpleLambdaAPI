@@ -19,22 +19,43 @@ namespace TodoLambda
 
         public APIGatewayProxyResponse FunctionHandler(APIGatewayProxyRequest request, ILambdaContext context)
         {
-            // Детальное логирование
-            context.Logger.LogLine($"Request Method: {request.HttpMethod}");
-            context.Logger.LogLine($"Request Path: {request.Path}");
-            context.Logger.LogLine($"Request Resource: {request.Resource}");
-            context.Logger.LogLine($"Request Body: {request.Body}");
+            // Детальное логирование для отладки
+            context.Logger.LogLine($"=== Request Details ===");
+            context.Logger.LogLine($"HttpMethod: '{request.HttpMethod}'");
+            context.Logger.LogLine($"Path: '{request.Path}'");
+            context.Logger.LogLine($"Resource: '{request.Resource}'");
+
+            if (request.Headers != null)
+            {
+                foreach (var header in request.Headers)
+                {
+                    context.Logger.LogLine($"Header: {header.Key} = {header.Value}");
+                }
+            }
+
+            context.Logger.LogLine($"Body: {request.Body}");
+            context.Logger.LogLine($"===================");
 
             try
             {
-                return request.HttpMethod?.ToUpper() switch
+                // Если метод пустой или null, пробуем GET по умолчанию
+                var httpMethod = string.IsNullOrWhiteSpace(request.HttpMethod) ? "GET" : request.HttpMethod.ToUpper();
+
+                context.Logger.LogLine($"Processing as method: {httpMethod}");
+
+                return httpMethod switch
                 {
                     "GET" => HandleGet(),
                     "POST" => HandlePost(request.Body),
                     "PUT" => HandlePut(request.Body),
-                    "DELETE" => CreateResponse(200, "[]"),
-                    "OPTIONS" => CreateResponse(200, ""), // Для CORS preflight
-                    _ => CreateResponse(405, $"Method '{request.HttpMethod}' not allowed. Supported methods: GET, POST, PUT, DELETE")
+                    "DELETE" => HandleDelete(),
+                    "OPTIONS" => HandleOptions(),
+                    _ => CreateResponse(405, JsonSerializer.Serialize(new
+                    {
+                        error = "Method not allowed",
+                        method = httpMethod,
+                        supportedMethods = new[] { "GET", "POST", "PUT", "DELETE", "OPTIONS" }
+                    }))
                 };
             }
             catch (Exception ex)
@@ -69,9 +90,13 @@ namespace TodoLambda
                 todos.Add(newTodo);
                 return CreateResponse(201, JsonSerializer.Serialize(newTodo));
             }
-            catch (JsonException)
+            catch (JsonException ex)
             {
-                return CreateResponse(400, JsonSerializer.Serialize(new { error = "Invalid JSON format" }));
+                return CreateResponse(400, JsonSerializer.Serialize(new
+                {
+                    error = "Invalid JSON format",
+                    details = ex.Message
+                }));
             }
         }
 
@@ -101,10 +126,25 @@ namespace TodoLambda
 
                 return CreateResponse(404, JsonSerializer.Serialize(new { error = "Todo not found" }));
             }
-            catch (JsonException)
+            catch (JsonException ex)
             {
-                return CreateResponse(400, JsonSerializer.Serialize(new { error = "Invalid JSON format" }));
+                return CreateResponse(400, JsonSerializer.Serialize(new
+                {
+                    error = "Invalid JSON format",
+                    details = ex.Message
+                }));
             }
+        }
+
+        private APIGatewayProxyResponse HandleDelete()
+        {
+            todos.Clear();
+            return CreateResponse(200, JsonSerializer.Serialize(new { message = "All todos deleted" }));
+        }
+
+        private APIGatewayProxyResponse HandleOptions()
+        {
+            return CreateResponse(200, "");
         }
 
         private APIGatewayProxyResponse CreateResponse(int statusCode, string body)
