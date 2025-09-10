@@ -3,7 +3,7 @@
     "Default values for Lambda deployment"
   ],
   "profile": "default",
-  "region": "us-east-1",
+  "region": "us-east-2",
   "configuration": "Release",
   "function-runtime": "dotnet8",
   "function-memory-size": 256,
