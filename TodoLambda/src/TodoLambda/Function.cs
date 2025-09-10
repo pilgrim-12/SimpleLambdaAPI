@@ -1,4 +1,4 @@
-using Amazon.Lambda.Core;
+﻿using Amazon.Lambda.Core;
 using Amazon.Lambda.APIGatewayEvents;
 using System.Text.Json;
 using System.Collections.Generic;
@@ -21,13 +21,25 @@ namespace TodoLambda
         {
             context.Logger.LogLine($"Request: {request.HttpMethod} {request.Path}");
 
+            // Проверяем путь - API Gateway может добавить /TodoLambdaFunction к пути
+            var isValidPath = request.Path == null ||
+                             request.Path == "/" ||
+                             request.Path.EndsWith("/TodoLambdaFunction") ||
+                             request.Path.EndsWith("/todos");
+
+            if (!isValidPath)
+            {
+                return CreateResponse(404, "Not found");
+            }
+
             try
             {
-                return request.HttpMethod switch
+                return request.HttpMethod?.ToUpper() switch
                 {
                     "GET" => HandleGet(),
                     "POST" => HandlePost(request.Body),
                     "PUT" => HandlePut(request.Body),
+                    "DELETE" => CreateResponse(200, "[]"), // Для простоты возвращаем пустой массив
                     _ => CreateResponse(405, "Method not allowed")
                 };
             }
