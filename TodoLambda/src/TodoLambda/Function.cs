@@ -19,18 +19,11 @@ namespace TodoLambda
 
         public APIGatewayProxyResponse FunctionHandler(APIGatewayProxyRequest request, ILambdaContext context)
         {
-            context.Logger.LogLine($"Request: {request.HttpMethod} {request.Path}");
-
-            // Проверяем путь - API Gateway может добавить /TodoLambdaFunction к пути
-            var isValidPath = request.Path == null ||
-                             request.Path == "/" ||
-                             request.Path.EndsWith("/TodoLambdaFunction") ||
-                             request.Path.EndsWith("/todos");
-
-            if (!isValidPath)
-            {
-                return CreateResponse(404, "Not found");
-            }
+            // Детальное логирование
+            context.Logger.LogLine($"Request Method: {request.HttpMethod}");
+            context.Logger.LogLine($"Request Path: {request.Path}");
+            context.Logger.LogLine($"Request Resource: {request.Resource}");
+            context.Logger.LogLine($"Request Body: {request.Body}");
 
             try
             {
@@ -39,14 +32,16 @@ namespace TodoLambda
                     "GET" => HandleGet(),
                     "POST" => HandlePost(request.Body),
                     "PUT" => HandlePut(request.Body),
-                    "DELETE" => CreateResponse(200, "[]"), // Для простоты возвращаем пустой массив
-                    _ => CreateResponse(405, "Method not allowed")
+                    "DELETE" => CreateResponse(200, "[]"),
+                    "OPTIONS" => CreateResponse(200, ""), // Для CORS preflight
+                    _ => CreateResponse(405, $"Method '{request.HttpMethod}' not allowed. Supported methods: GET, POST, PUT, DELETE")
                 };
             }
             catch (Exception ex)
             {
                 context.Logger.LogLine($"Error: {ex.Message}");
-                return CreateResponse(500, ex.Message);
+                context.Logger.LogLine($"StackTrace: {ex.StackTrace}");
+                return CreateResponse(500, JsonSerializer.Serialize(new { error = ex.Message }));
             }
         }
 
@@ -59,7 +54,7 @@ namespace TodoLambda
         {
             if (string.IsNullOrEmpty(body))
             {
-                return CreateResponse(400, "Request body is required");
+                return CreateResponse(400, JsonSerializer.Serialize(new { error = "Request body is required" }));
             }
 
             try
@@ -67,7 +62,7 @@ namespace TodoLambda
                 var newTodo = JsonSerializer.Deserialize<TodoItem>(body);
                 if (newTodo == null)
                 {
-                    return CreateResponse(400, "Invalid todo item");
+                    return CreateResponse(400, JsonSerializer.Serialize(new { error = "Invalid todo item" }));
                 }
 
                 newTodo.Id = todos.Count > 0 ? todos.Max(t => t.Id) + 1 : 1;
@@ -76,7 +71,7 @@ namespace TodoLambda
             }
             catch (JsonException)
             {
-                return CreateResponse(400, "Invalid JSON format");
+                return CreateResponse(400, JsonSerializer.Serialize(new { error = "Invalid JSON format" }));
             }
         }
 
@@ -84,7 +79,7 @@ namespace TodoLambda
         {
             if (string.IsNullOrEmpty(body))
             {
-                return CreateResponse(400, "Request body is required");
+                return CreateResponse(400, JsonSerializer.Serialize(new { error = "Request body is required" }));
             }
 
             try
@@ -92,7 +87,7 @@ namespace TodoLambda
                 var updatedTodo = JsonSerializer.Deserialize<TodoItem>(body);
                 if (updatedTodo == null)
                 {
-                    return CreateResponse(400, "Invalid todo item");
+                    return CreateResponse(400, JsonSerializer.Serialize(new { error = "Invalid todo item" }));
                 }
 
                 var existingTodo = todos.FirstOrDefault(t => t.Id == updatedTodo.Id);
@@ -104,11 +99,11 @@ namespace TodoLambda
                     return CreateResponse(200, JsonSerializer.Serialize(existingTodo));
                 }
 
-                return CreateResponse(404, "Todo not found");
+                return CreateResponse(404, JsonSerializer.Serialize(new { error = "Todo not found" }));
             }
             catch (JsonException)
             {
-                return CreateResponse(400, "Invalid JSON format");
+                return CreateResponse(400, JsonSerializer.Serialize(new { error = "Invalid JSON format" }));
             }
         }
 
@@ -120,7 +115,9 @@ namespace TodoLambda
                 Headers = new Dictionary<string, string>
                 {
                     { "Content-Type", "application/json" },
-                    { "Access-Control-Allow-Origin", "*" }
+                    { "Access-Control-Allow-Origin", "*" },
+                    { "Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS" },
+                    { "Access-Control-Allow-Headers", "Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token" }
                 },
                 Body = body
             };
