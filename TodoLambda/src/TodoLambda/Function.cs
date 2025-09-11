@@ -1,9 +1,12 @@
 ﻿using Amazon.Lambda.Core;
 using Amazon.Lambda.APIGatewayEvents;
+using Amazon.DynamoDBv2;
+using Amazon.DynamoDBv2.Model;
 using System.Text.Json;
 using System.Collections.Generic;
 using System.Linq;
 using System;
+using System.Threading.Tasks;
 
 [assembly: LambdaSerializer(typeof(Amazon.Lambda.Serialization.SystemTextJson.DefaultLambdaJsonSerializer))]
 
@@ -11,51 +14,31 @@ namespace TodoLambda
 {
     public class Function
     {
-        private static List<TodoItem> todos = new List<TodoItem>
+        private readonly IAmazonDynamoDB _dynamoDbClient;
+        private const string TableName = "TodoItems";
+
+        public Function()
         {
-            new TodoItem { Id = 1, Title = "Learn AWS Lambda", IsCompleted = false },
-            new TodoItem { Id = 2, Title = "Deploy to AWS", IsCompleted = false }
-        };
+            _dynamoDbClient = new AmazonDynamoDBClient();
+        }
 
-        public APIGatewayProxyResponse FunctionHandler(APIGatewayProxyRequest request, ILambdaContext context)
+        public async Task<APIGatewayProxyResponse> FunctionHandler(APIGatewayProxyRequest request, ILambdaContext context)
         {
-            // Детальное логирование для отладки
-            context.Logger.LogLine($"=== Request Details ===");
-            context.Logger.LogLine($"HttpMethod: '{request.HttpMethod}'");
-            context.Logger.LogLine($"Path: '{request.Path}'");
-            context.Logger.LogLine($"Resource: '{request.Resource}'");
-
-            if (request.Headers != null)
-            {
-                foreach (var header in request.Headers)
-                {
-                    context.Logger.LogLine($"Header: {header.Key} = {header.Value}");
-                }
-            }
-
-            context.Logger.LogLine($"Body: {request.Body}");
-            context.Logger.LogLine($"===================");
+            context.Logger.LogLine($"Request Method: {request.HttpMethod}");
+            context.Logger.LogLine($"Request Path: {request.Path}");
 
             try
             {
-                // Если метод пустой или null, пробуем GET по умолчанию
                 var httpMethod = string.IsNullOrWhiteSpace(request.HttpMethod) ? "GET" : request.HttpMethod.ToUpper();
-
-                context.Logger.LogLine($"Processing as method: {httpMethod}");
 
                 return httpMethod switch
                 {
-                    "GET" => HandleGet(),
-                    "POST" => HandlePost(request.Body),
-                    "PUT" => HandlePut(request.Body),
-                    "DELETE" => HandleDelete(),
+                    "GET" => await HandleGet(),
+                    "POST" => await HandlePost(request.Body),
+                    "PUT" => await HandlePut(request.Body),
+                    "DELETE" => await HandleDelete(request.Body),
                     "OPTIONS" => HandleOptions(),
-                    _ => CreateResponse(405, JsonSerializer.Serialize(new
-                    {
-                        error = "Method not allowed",
-                        method = httpMethod,
-                        supportedMethods = new[] { "GET", "POST", "PUT", "DELETE", "OPTIONS" }
-                    }))
+                    _ => CreateResponse(405, JsonSerializer.Serialize(new { error = "Method not allowed" }))
                 };
             }
             catch (Exception ex)
@@ -66,12 +49,30 @@ namespace TodoLambda
             }
         }
 
-        private APIGatewayProxyResponse HandleGet()
+        private async Task<APIGatewayProxyResponse> HandleGet()
         {
-            return CreateResponse(200, JsonSerializer.Serialize(todos));
+            var scanRequest = new ScanRequest
+            {
+                TableName = TableName
+            };
+
+            var response = await _dynamoDbClient.ScanAsync(scanRequest);
+            var todos = new List<TodoItem>();
+
+            foreach (var item in response.Items)
+            {
+                todos.Add(new TodoItem
+                {
+                    Id = int.Parse(item["Id"].N),
+                    Title = item["Title"].S,
+                    IsCompleted = item["IsCompleted"].BOOL
+                });
+            }
+
+            return CreateResponse(200, JsonSerializer.Serialize(todos.OrderBy(t => t.Id)));
         }
 
-        private APIGatewayProxyResponse HandlePost(string? body)
+        private async Task<APIGatewayProxyResponse> HandlePost(string? body)
         {
             if (string.IsNullOrEmpty(body))
             {
@@ -86,21 +87,37 @@ namespace TodoLambda
                     return CreateResponse(400, JsonSerializer.Serialize(new { error = "Invalid todo item" }));
                 }
 
-                newTodo.Id = todos.Count > 0 ? todos.Max(t => t.Id) + 1 : 1;
-                todos.Add(newTodo);
+                // Get next ID
+                var scanRequest = new ScanRequest { TableName = TableName };
+                var scanResponse = await _dynamoDbClient.ScanAsync(scanRequest);
+                var maxId = scanResponse.Items.Count > 0
+                    ? scanResponse.Items.Max(item => int.Parse(item["Id"].N))
+                    : 0;
+
+                newTodo.Id = maxId + 1;
+
+                // Save to DynamoDB
+                var putRequest = new PutItemRequest
+                {
+                    TableName = TableName,
+                    Item = new Dictionary<string, AttributeValue>
+                    {
+                        ["Id"] = new AttributeValue { N = newTodo.Id.ToString() },
+                        ["Title"] = new AttributeValue { S = newTodo.Title },
+                        ["IsCompleted"] = new AttributeValue { BOOL = newTodo.IsCompleted }
+                    }
+                };
+
+                await _dynamoDbClient.PutItemAsync(putRequest);
                 return CreateResponse(201, JsonSerializer.Serialize(newTodo));
             }
             catch (JsonException ex)
             {
-                return CreateResponse(400, JsonSerializer.Serialize(new
-                {
-                    error = "Invalid JSON format",
-                    details = ex.Message
-                }));
+                return CreateResponse(400, JsonSerializer.Serialize(new { error = "Invalid JSON format", details = ex.Message }));
             }
         }
 
-        private APIGatewayProxyResponse HandlePut(string? body)
+        private async Task<APIGatewayProxyResponse> HandlePut(string? body)
         {
             if (string.IsNullOrEmpty(body))
             {
@@ -115,30 +132,96 @@ namespace TodoLambda
                     return CreateResponse(400, JsonSerializer.Serialize(new { error = "Invalid todo item" }));
                 }
 
-                var existingTodo = todos.FirstOrDefault(t => t.Id == updatedTodo.Id);
-
-                if (existingTodo != null)
+                // Check if item exists
+                var getRequest = new GetItemRequest
                 {
-                    existingTodo.Title = updatedTodo.Title;
-                    existingTodo.IsCompleted = updatedTodo.IsCompleted;
-                    return CreateResponse(200, JsonSerializer.Serialize(existingTodo));
+                    TableName = TableName,
+                    Key = new Dictionary<string, AttributeValue>
+                    {
+                        ["Id"] = new AttributeValue { N = updatedTodo.Id.ToString() }
+                    }
+                };
+
+                var getResponse = await _dynamoDbClient.GetItemAsync(getRequest);
+                if (getResponse.Item == null || getResponse.Item.Count == 0)
+                {
+                    return CreateResponse(404, JsonSerializer.Serialize(new { error = "Todo not found" }));
                 }
 
-                return CreateResponse(404, JsonSerializer.Serialize(new { error = "Todo not found" }));
+                // Update item
+                var updateRequest = new UpdateItemRequest
+                {
+                    TableName = TableName,
+                    Key = new Dictionary<string, AttributeValue>
+                    {
+                        ["Id"] = new AttributeValue { N = updatedTodo.Id.ToString() }
+                    },
+                    AttributeUpdates = new Dictionary<string, AttributeValueUpdate>
+                    {
+                        ["Title"] = new AttributeValueUpdate
+                        {
+                            Action = AttributeAction.PUT,
+                            Value = new AttributeValue { S = updatedTodo.Title }
+                        },
+                        ["IsCompleted"] = new AttributeValueUpdate
+                        {
+                            Action = AttributeAction.PUT,
+                            Value = new AttributeValue { BOOL = updatedTodo.IsCompleted }
+                        }
+                    }
+                };
+
+                await _dynamoDbClient.UpdateItemAsync(updateRequest);
+                return CreateResponse(200, JsonSerializer.Serialize(updatedTodo));
             }
             catch (JsonException ex)
             {
-                return CreateResponse(400, JsonSerializer.Serialize(new
-                {
-                    error = "Invalid JSON format",
-                    details = ex.Message
-                }));
+                return CreateResponse(400, JsonSerializer.Serialize(new { error = "Invalid JSON format", details = ex.Message }));
             }
         }
 
-        private APIGatewayProxyResponse HandleDelete()
+        private async Task<APIGatewayProxyResponse> HandleDelete(string? body)
         {
-            todos.Clear();
+            if (!string.IsNullOrEmpty(body))
+            {
+                try
+                {
+                    var todoToDelete = JsonSerializer.Deserialize<TodoItem>(body);
+                    if (todoToDelete != null && todoToDelete.Id > 0)
+                    {
+                        var deleteRequest = new DeleteItemRequest
+                        {
+                            TableName = TableName,
+                            Key = new Dictionary<string, AttributeValue>
+                            {
+                                ["Id"] = new AttributeValue { N = todoToDelete.Id.ToString() }
+                            }
+                        };
+
+                        await _dynamoDbClient.DeleteItemAsync(deleteRequest);
+                        return CreateResponse(200, JsonSerializer.Serialize(new { message = "Todo deleted" }));
+                    }
+                }
+                catch { }
+            }
+
+            // Delete all
+            var scanRequest = new ScanRequest { TableName = TableName };
+            var scanResponse = await _dynamoDbClient.ScanAsync(scanRequest);
+
+            foreach (var item in scanResponse.Items)
+            {
+                var deleteRequest = new DeleteItemRequest
+                {
+                    TableName = TableName,
+                    Key = new Dictionary<string, AttributeValue>
+                    {
+                        ["Id"] = new AttributeValue { N = item["Id"].N }
+                    }
+                };
+                await _dynamoDbClient.DeleteItemAsync(deleteRequest);
+            }
+
             return CreateResponse(200, JsonSerializer.Serialize(new { message = "All todos deleted" }));
         }
 
