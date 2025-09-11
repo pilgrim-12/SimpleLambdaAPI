@@ -24,12 +24,24 @@ namespace TodoLambda
 
         public async Task<APIGatewayProxyResponse> FunctionHandler(APIGatewayProxyRequest request, ILambdaContext context)
         {
-            context.Logger.LogLine($"Request Method: {request.HttpMethod}");
-            context.Logger.LogLine($"Request Path: {request.Path}");
+            context.Logger.LogLine($"=== FULL REQUEST START ===");
+            context.Logger.LogLine($"Full request JSON: {JsonSerializer.Serialize(request)}");
+            context.Logger.LogLine($"Request is null: {request == null}");
+            context.Logger.LogLine($"HttpMethod: '{request?.HttpMethod}'");
+            context.Logger.LogLine($"Path: '{request?.Path}'");
+            context.Logger.LogLine($"Body: '{request?.Body}'");
+            context.Logger.LogLine($"=== FULL REQUEST END ===");
 
             try
             {
+                if (request == null)
+                {
+                    context.Logger.LogLine("ERROR: Request is null!");
+                    return CreateResponse(400, JsonSerializer.Serialize(new { error = "Request is null" }));
+                }
+
                 var httpMethod = string.IsNullOrWhiteSpace(request.HttpMethod) ? "GET" : request.HttpMethod.ToUpper();
+                context.Logger.LogLine($"Processing as method: {httpMethod}");
 
                 return httpMethod switch
                 {
@@ -43,9 +55,9 @@ namespace TodoLambda
             }
             catch (Exception ex)
             {
-                context.Logger.LogLine($"Error: {ex.Message}");
+                context.Logger.LogLine($"ERROR: {ex.GetType().Name}: {ex.Message}");
                 context.Logger.LogLine($"StackTrace: {ex.StackTrace}");
-                return CreateResponse(500, JsonSerializer.Serialize(new { error = ex.Message }));
+                return CreateResponse(500, JsonSerializer.Serialize(new { error = ex.Message, type = ex.GetType().Name }));
             }
         }
 
